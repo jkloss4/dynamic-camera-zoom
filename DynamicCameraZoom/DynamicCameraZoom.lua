@@ -75,7 +75,7 @@ local db -- DynamicCameraZoomDB
 --- The farthest the camera can go: 15 yards times the game's max zoom factor (Options > Camera's Max Camera Distance)
 local function maxCameraDistance()
     local factor = tonumber(GetCVar("cameraDistanceMaxZoomFactor")) or 1.9
-    return math.floor(15 * factor * 2 + 0.5) / 2
+    return math.floor(15 * factor + 0.5) -- in whole yards, like the sliders and the mouse wheel
 end
 
 local cameraTarget, cameraUntil -- where a zoom of ours is headed, and when it gets there
@@ -365,7 +365,7 @@ local function minimapSliderText()
 end
 
 local function zoomText()
-    return ("camera %.1f yd, minimap %s"):format(math.floor(GetCameraZoom() * 2 + 0.5) / 2, minimapSliderText())
+    return ("camera %d yd, minimap %s"):format(math.floor(GetCameraZoom() + 0.5), minimapSliderText())
 end
 
 local function printZoom()
@@ -458,10 +458,10 @@ local getCamera, setCamera = setting("camera")
 triggersTab:Checkbox("Zoom Camera", getCamera, setCamera,
     function() return "Zoom the camera to the distance below " .. TRIGGER_TEXT[selected] .. "." end)
 local getDistance, setDistance = setting("cameraDistance")
-triggersTab:Slider("Camera Distance", 1, maxCameraDistance(), 0.5, getDistance, setDistance,
-    function(value) return ("%.1f yd"):format(value) end,
+triggersTab:Slider("Camera Distance", 1, maxCameraDistance(), 1, getDistance, setDistance,
+    function(value) return ("%d yd"):format(value) end,
     "How far the camera zooms out. The most is your Max Camera Distance (Options > Camera), "
-        .. ("%.1f yards now."):format(maxCameraDistance()), onlyWith("camera"))
+        .. ("%d yards now."):format(maxCameraDistance()), onlyWith("camera"))
 
 local getMinimap, setMinimap = setting("minimap")
 triggersTab:Checkbox("Zoom Minimap", getMinimap, setMinimap,
@@ -618,6 +618,8 @@ events:SetScript("OnEvent", function(self, event, arg1)
             for key, value in pairs(DEFAULTS[id]) do
                 if db[id][key] == nil then db[id][key] = value end
             end
+            -- Camera Distance goes in whole yards (it used to go in halves)
+            db[id].cameraDistance = math.floor(db[id].cameraDistance + 0.5)
         end
         for key, value in pairs(GENERAL_DEFAULTS) do
             if db[key] == nil then db[key] = value end
