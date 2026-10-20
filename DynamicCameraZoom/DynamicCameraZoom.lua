@@ -15,7 +15,6 @@ local IS_RETAIL = WOW_PROJECT_ID == WOW_PROJECT_MAINLINE
 
 local MAX_ZOOM_SPEED = 50 -- the game's limit for cameraZoomSpeed, in yards per second
 local POLL_INTERVAL = 0.1 -- how often the triggers are checked
-local FISHING_LINGER = 3 -- seconds fishing stays on after a cast ends, so it doesn't zoom back out between casts
 
 -- Every trigger, in the default priority order (highest first). Flying mounts are told apart from ground ones on
 -- retail only: WoW: Forever has no flying mounts, and no flying trigger.
@@ -64,6 +63,7 @@ local DEFAULTS = {
     instance = trigger(false, 15, false, 2, 0, 1),
     indoors = trigger(true, 10, false, 3, 0, 0.5),
 }
+DEFAULTS.fishing.endDelay = 3 -- between casts, so it doesn't zoom back out each time
 local GENERAL_DEFAULTS = { respectManualZoom = true, waitOutCombat = true, minimapStep = 0.1 }
 
 local db -- DynamicCameraZoomDB
@@ -184,20 +184,17 @@ end
 -- Midnight's Void Hole Fishing. By name, as the spell IDs differ between clients, ranks and kinds.
 local FISHING_NAME = (C_Spell and C_Spell.GetSpellName and (C_Spell.GetSpellName(131474) or C_Spell.GetSpellName(7620)))
     or (GetSpellInfo and GetSpellInfo(7620)) or "Fishing"
-local lastFishing = 0
 
 local function isFishingSpell(name)
     return type(name) == "string" and not (issecretvalue and issecretvalue(name))
         and name:find(FISHING_NAME, 1, true) ~= nil
 end
 
+-- It ends with the cast; its end Zoom Delay (default 3 sec) keeps it from zooming back out between casts
 local function isFishing()
     local channelOk, channel = pcall(UnitChannelInfo, "player")
     local castOk, cast = pcall(UnitCastingInfo, "player")
-    if (channelOk and isFishingSpell(channel)) or (castOk and isFishingSpell(cast)) then
-        lastFishing = GetTime()
-    end
-    return lastFishing > 0 and GetTime() - lastFishing < FISHING_LINGER
+    return (channelOk and isFishingSpell(channel)) or (castOk and isFishingSpell(cast)) or false
 end
 
 -- /dcz fishing: print what the player is channeling or casting, to see a fishing kind's spell name

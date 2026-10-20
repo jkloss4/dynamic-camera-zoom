@@ -9,7 +9,8 @@ Retail (Interface 120100) and WoW: Forever (Interface 16001).
 ## Triggers
 
 - **Combat:** from entering combat until you leave it.
-- **Fishing:** while you're casting Fishing (and a few seconds after, so it doesn't zoom back out between casts).
+- **Fishing:** while you're casting Fishing (Void Hole Fishing too). Its end Zoom Delay (3 sec by default) keeps it
+  from zooming back out between casts.
 - **Talking to NPCs:** from opening an NPC's window (gossip, a quest, a vendor, a trainer...) until it closes.
 - **Mailbox, Bank & Auction House:** while a mailbox, bank, guild bank or auction house is open.
 - **Flight Paths:** from taking off until you land.
