@@ -1,0 +1,21 @@
+## Interface: 120100, 120105, 16001
+## Title: Dynamic Camera Zoom
+## Notes: Zooms the camera and minimap when you talk to an NPC or mount up, and back when you're done.
+## Version: 1.0.0
+## Author: Jay Kloss
+## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
+## Category-enUS: User Interface
+## Category-deDE: Benutzerinterface
+## Category-esES: Interfaz de usuario
+## Category-esMX: Interfaz de usuario
+## Category-frFR: Interface utilisateur
+## Category-itIT: Interfaccia utente
+## Category-koKR: 사용자 인터페이스
+## Category-ptBR: Interface do usuário
+## Category-ruRU: Интерфейс пользователя
+## Category-zhCN: 用户界面
+## Category-zhTW: 使用者介面
+## SavedVariables: DynamicCameraZoomDB
+
+SettingsKit.lua
+DynamicCameraZoom.lua

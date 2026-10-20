@@ -1,0 +1,45 @@
+name: Release
+
+# Push a tag like v1.0.0 to build the addon zip and publish it as a GitHub release.
+# Addon managers that support GitHub releases (e.g. WowUp) install/update from this.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^## Version:.*/## Version: ${VERSION}/" DynamicCameraZoom/DynamicCameraZoom.toc
+
+      - name: Package
+        run: |
+          ZIP="DynamicCameraZoom-${GITHUB_REF_NAME}.zip"
+          # one release.json metadata entry per flavor, from the first "## Interface:" value of each:
+          # 1xxxxx = mainline (retail), 16xxx = forever (WoW: Forever)
+          METADATA="" SEEN=""
+          for I in $(grep -m1 '^## Interface:' DynamicCameraZoom/DynamicCameraZoom.toc | sed 's/## Interface: *//' | tr -d ' \r' | tr ',' ' '); do
+            if [ "$I" -ge 100000 ]; then FLAVOR=mainline
+            elif [ "$I" -ge 16000 ] && [ "$I" -lt 20000 ]; then FLAVOR=forever
+            else continue; fi
+            case " $SEEN " in *" $FLAVOR "*) continue ;; esac
+            SEEN="$SEEN $FLAVOR"
+            METADATA="${METADATA:+$METADATA,}{\"flavor\":\"$FLAVOR\",\"interface\":$I}"
+          done
+          zip -r "$ZIP" DynamicCameraZoom
+          echo "{\"releases\":[{\"filename\":\"$ZIP\",\"nolib\":false,\"metadata\":[$METADATA]}]}" > release.json
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "DynamicCameraZoom-${GITHUB_REF_NAME}.zip" release.json \
+            --title "$GITHUB_REF_NAME" --generate-notes
