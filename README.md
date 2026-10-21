@@ -31,6 +31,8 @@ Options > AddOns > Dynamic Camera Zoom (or `/dcz`). On the **Triggers** tab:
   when the trigger ends.
 - **Wait Out Combat:** other triggers don't zoom until combat ends (the Combat trigger still does).
 - **Minimap Zoom Step:** the most time the minimap takes for each zoom level it passes through (Instant to 0.5 sec).
+- **Camera Easing:** Linear (one steady speed, the game's own) or Ease Out (the default: starts quickly, slows as it
+  arrives).
 - **Settings For:** pick a trigger to set its options:
   - **Zoom Camera** and **Camera Distance**, up to your Max Camera Distance (Options > Camera).
   - **Zoom Minimap** and **Minimap Zoom**, from Closest to Farthest.
@@ -43,11 +45,24 @@ The **Priority** tab orders the triggers, highest first, with up and down arrows
 To find values to set: `/dcz zoom` prints your camera distance and minimap zoom, and `/dcz trace` prints them each time
 you stop zooming (again to turn it off).
 
+`/dcz debug` logs every zoom and camera reading to the saved settings (the last 400 lines; `/dcz debug clear` empties
+it), for tracking down a zoom that lands in the wrong place.
+
 ## How the zoom works
 
 The game only lets addons zoom the camera by an amount, at the speed of its camera zoom speed setting. For each zoom
 the addon sets that speed so the zoom takes the transition time, then puts your own speed back (also at the next login,
-if the game closes mid-zoom). The minimap has fixed zoom levels; a transition steps through the levels between.
+if the game closes mid-zoom). A zoom that starts while another is still moving keeps that one's speed: changing the
+speed mid-zoom makes the game miscount what's left of it. When a zoom should be done it's checked, and corrected once if
+it landed somewhere else (unless you zoomed yourself in the meantime).
+
+The game's zoom has no curve, so an eased zoom is drawn with straight segments of equal distance (about a fifth of a
+yard each), each one zoom: the curve sets how long each takes, so they're fast at the start and slow toward the end.
+Each starts as the last one finishes. The curve also blends in a little steady motion, so it lands from a gentle creep
+rather than a standstill. (There's no slow-start curve: the game starts every zoom out from rest with a quick burst,
+whatever the speed.) Zooming yourself stops it.
+
+The minimap has fixed zoom levels; a transition steps through the levels between.
 
 ## Install
 

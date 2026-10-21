@@ -4,7 +4,9 @@
 --
 -- The game lets addons zoom the camera only by an amount (CameraZoomIn/Out), at the speed of the cameraZoomSpeed
 -- setting. So a zoom works out the distance to go and sets that speed for the transition time asked, then puts the
--- player's own speed back. Minimap zoom is a level (0 farthest out); a transition steps through the levels between.
+-- player's own speed back, and checks it landed (correcting it once if not). A zoom given while one is still moving
+-- keeps its speed (see zoomCamera). Minimap zoom is a level (0 farthest out); a transition steps through the levels
+-- between.
 --
 -- Several triggers can be going on at once. The camera and the minimap are each zoomed by the highest-priority one
 -- (Priority tab) that zooms them; when none does any more, they go back to where they were before the first one did.
@@ -64,7 +66,7 @@ local DEFAULTS = {
     indoors = trigger(true, 10, false, 3, 0, 0.5),
 }
 DEFAULTS.fishing.endDelay = 3 -- between casts, so it doesn't zoom back out each time
-local GENERAL_DEFAULTS = { respectManualZoom = true, waitOutCombat = true, minimapStep = 0.1 }
+local GENERAL_DEFAULTS = { respectManualZoom = true, waitOutCombat = true, minimapStep = 0.1, easing = "out" }
 
 local db -- DynamicCameraZoomDB
 
@@ -95,27 +97,205 @@ local function restoreZoomSpeed()
     end
 end
 
-local function zoomCamera(distance, transition)
+-- /dcz debug: a log of zooms and camera readings, saved in DynamicCameraZoomDB.debugLog (last 400 lines)
+local function debugLog(text)
+    if not (db and db.debug) then return end
+    db.debugLog = db.debugLog or {}
+    local log = db.debugLog
+    log[#log + 1] = ("%s.%03d %s"):format(date("%H:%M:%S"), math.floor((GetTime() % 1) * 1000), text)
+    while #log > 400 do table.remove(log, 1) end
+end
+
+local manualZooms = 0 -- counts the player's own camera zooms (see the CameraZoomIn/Out hooks)
+local CORRECT_OVER = 0.5 -- yards a finished zoom can be off before it's corrected
+
+local zoomSpeed -- the speed our zoom in progress was given
+
+--- Zoom the camera to a distance over a transition time. Zooms are relative to where the game has the camera headed
+--- (a zoom given while another is moving adds to it - tested), so each one goes by where the last one was headed.
+--- But the game keeps the rest of a zoom in progress as time, not distance: changing the zoom speed mid-zoom stretches
+--- or shrinks what's left of it, which once overshot into first person. So a zoom given while one of ours is still
+--- moving keeps its speed (its transition time comes out a little different). When a zoom should be done it's
+--- checked, and if it's off (and the player hasn't zoomed since), corrected once.
+local zoomCamera
+
+--- After a zoom of ours should be done: put the player's zoom speed back, and check where the camera got to; if it's
+--- off (and the player hasn't zoomed since), correct it once
+local function checkLanding(distance, wait, manualAtStart, isCorrection)
+    speedToken = speedToken + 1
+    local token = speedToken
+    C_Timer.After(wait, function()
+        if token ~= speedToken then return end -- a newer zoom took over
+        restoreZoomSpeed()
+        zoomSpeed = nil
+        debugLog(("  check: at %.2f, wanted %.2f, manual zooms since %d"):format(GetCameraZoom(), distance,
+            manualZooms - manualAtStart))
+        local off = math.abs(GetCameraZoom() - distance) > CORRECT_OVER
+        if not isCorrection and manualZooms == manualAtStart and off then
+            cameraTarget = nil -- it went somewhere else: go by where it really is
+            zoomCamera(distance, 0.2, true)
+        end
+    end)
+end
+
+-- Easing (General > Easing). The game zooms at one constant speed, start to stop, and only adds zooms up exactly when
+-- they're a fair size and given while the speed stays the same (tested: lots of small zooms in quick succession over-
+-- or undershot by a yard or two, and the game rounds zooms under about 0.085 yd up). So a curve is drawn with straight
+-- segments of equal distance, each one zoom: the curve sets how long each takes, so the ones at a slow end of the curve
+-- are slow and the ones in the middle fast. Each starts as the last one finishes, so the speed changes with the camera
+-- at rest, never mid-zoom, and the speed changes a little from one to the next. The player zooming stops it.
+local EASE_STEP = 0.2 -- yards per segment, about (a zoom gets EASE_MIN_SEGMENTS to EASE_MAX_SEGMENTS)
+local EASE_MIN_SEGMENTS, EASE_MAX_SEGMENTS = 3, 60
+local EASE_CATCH_UP = 0.3 -- seconds after the curve ends for the camera to catch up before it's checked
+-- Only Ease Out: the game gives every zoom out from rest a quick burst at the start whatever the speed (tested: 1 yd
+-- out at 0.5 yd/s moved 0.6 yd in the first 0.1 sec), so a curve can't start a zoom out slowly - Ease In and Ease
+-- In-Out always jumped there. The curve blends in a little straight-line motion (EASE_LINEAR_MIX), so it lands from a
+-- gentle creep rather than a standstill (equal-distance segments at a standstill crawl, then lurch).
+local EASE_LINEAR_MIX = 0.25
+local function blended(shape)
+    return function(p) return (1 - EASE_LINEAR_MIX) * shape(p) + EASE_LINEAR_MIX * p end
+end
+local CURVES = {
+    out = blended(function(p) return 1 - (1 - p) ^ 3 end),
+}
+
+--- When (as a fraction of the transition) a curve reaches a fraction of the way: the curves only ever rise, so a
+--- binary search finds it
+local function curveTimeAt(curve, fraction)
+    local low, high = 0, 1
+    for _ = 1, 30 do
+        local middle = (low + high) / 2
+        if curve(middle) < fraction then low = middle else high = middle end
+    end
+    return (low + high) / 2
+end
+
+-- The eased zoom in progress: to, step (yards per segment, signed), times (when each segment ends, in seconds from
+-- the start), start, index (segments sent), pos (where the zooms so far head), sentAt (when the last was sent), manual
+local ease
+local easeFrame = CreateFrame("Frame")
+easeFrame:Hide()
+
+local function stopEase()
+    ease = nil
+    easeFrame:Hide()
+end
+
+local function easeStep()
+    local current = ease
+    if not current then easeFrame:Hide() return end
+    if manualZooms ~= current.manual then
+        -- The player zoomed: leave the camera to them
+        debugLog(("  eased zoom stopped: you zoomed (headed %.2f)"):format(current.pos))
+        stopEase()
+        checkLanding(current.to, 0.3, current.manual, true)
+        return
+    end
+    local now = GetTime()
+    local index = current.index
+    -- The next segment starts when the last one ends (the first at the start)
+    local startsAt = current.start + (index > 0 and current.times[index] or 0)
+    if now < startsAt then
+        -- The camera already got there: the game sometimes jumps a zoom out instead of gliding it (the first from
+        -- rest, tested), and waiting out the segment's time left it sitting still. So the rest of the curve moves up.
+        if index == 0 or now <= current.sentAt or math.abs(GetCameraZoom() - current.pos) > 0.01 then return end
+        current.start = current.start - (startsAt - now)
+        debugLog(("  segment %d arrived early: the rest moves up %.2fs"):format(index, startsAt - now))
+    end
+    if index >= #current.times then
+        stopEase()
+        checkLanding(current.to, EASE_CATCH_UP, current.manual, false)
+        return
+    end
+
+    index = index + 1
+    current.index = index
+    local segmentTime = current.times[index] - (index > 1 and current.times[index - 1] or 0)
+    local target = index == #current.times and current.to or current.pos + current.step
+    local amount = target - current.pos
+    -- (a floor of its own would make a slow segment arrive early and wait)
+    local speed = math.max(0.05, math.min(MAX_ZOOM_SPEED, math.abs(amount) / math.max(segmentTime, 0.001)))
+    SetCVar("cameraZoomSpeed", speed)
+    zoomSpeed = speed
+    zoomingCamera = true
+    if amount > 0 then CameraZoomOut(amount) else CameraZoomIn(-amount) end
+    zoomingCamera = false
+    debugLog(("  segment %d/%d: %s %.2f over %.2fs at speed %.1f"):format(index, #current.times,
+        amount > 0 and "out" or "in", math.abs(amount), segmentTime, speed))
+    current.pos, current.sentAt = target, now
+    cameraTarget, cameraUntil = target, now + segmentTime + EASE_CATCH_UP
+end
+easeFrame:SetScript("OnUpdate", easeStep)
+
+local function startEase(distance, transition)
+    local from = cameraDistance()
+    local range = distance - from
+    if math.abs(range) < 0.05 then return end
+    if not db.userZoomSpeed then db.userZoomSpeed = GetCVar("cameraZoomSpeed") end
+    local segments = math.floor(math.abs(range) / EASE_STEP + 0.5)
+    segments = math.max(EASE_MIN_SEGMENTS, math.min(EASE_MAX_SEGMENTS, segments))
+    local curve = CURVES[db.easing] or CURVES.out
+    local times = {}
+    for index = 1, segments do
+        times[index] = curveTimeAt(curve, index / segments) * transition
+    end
+    times[segments] = transition
+    speedToken = speedToken + 1 -- a pending check of an earlier zoom is moot now
+    local now = GetTime()
+    -- A zoom of ours still moving finishes first (its speed can't change mid-zoom): the curve starts when it's done -
+    -- a curve's segment, or a linear zoom
+    local startAt = now
+    if ease then
+        startAt = ease.start + (ease.index > 0 and ease.times[ease.index] or 0)
+    elseif cameraTarget and now < cameraUntil then
+        startAt = cameraUntil
+    end
+    ease = { to = distance, step = range / segments, times = times, start = math.max(now, startAt), index = 0,
+        pos = from, sentAt = 0, manual = manualZooms }
+    cameraTarget, cameraUntil = from, now + transition + EASE_CATCH_UP
+    debugLog(("  eased (%s) from %.2f over %.1fs in %d segments"):format(db.easing, from, transition, segments))
+    easeFrame:Show()
+end
+
+zoomCamera = function(distance, transition, isCorrection)
+    local inProgress = cameraTarget and GetTime() < cameraUntil
+    debugLog(("zoom asked: to %.1f over %.1fs%s (headed %.2f, at %.2f, mounted %s, in progress %s)"):format(distance,
+        transition, isCorrection and " CORRECTION" or "", cameraDistance(), GetCameraZoom(), tostring(IsMounted()),
+        tostring(inProgress)))
     distance = math.max(0, math.min(distance, maxCameraDistance()))
+    if db.easing ~= "linear" and transition > 0 and not isCorrection then
+        startEase(distance, transition)
+        return
+    end
+    -- Linear (or instant, or a correction): an eased zoom in progress ends where it's got to
+    if ease then
+        ease = nil
+        easeFrame:Hide()
+    end
     local change = distance - cameraDistance()
     if math.abs(change) < 0.05 then return end
 
-    local speed = transition > 0 and math.min(MAX_ZOOM_SPEED, math.abs(change) / transition) or MAX_ZOOM_SPEED
-    speed = math.max(speed, 1)
-    -- Saved before the first change, so it's put back even if the game closes mid-zoom (ADDON_LOADED)
-    if not db.userZoomSpeed then db.userZoomSpeed = GetCVar("cameraZoomSpeed") end
-    SetCVar("cameraZoomSpeed", speed)
+    -- The speed is for the glide from where the camera really is; kept as it is while a zoom of ours is moving
+    local travel = math.abs(distance - GetCameraZoom())
+    local speed
+    if inProgress and zoomSpeed then
+        speed = zoomSpeed
+    else
+        speed = transition > 0 and math.min(MAX_ZOOM_SPEED, travel / transition) or MAX_ZOOM_SPEED
+        speed = math.max(speed, 1)
+        -- Saved before the first change, so it's put back even if the game closes mid-zoom (ADDON_LOADED)
+        if not db.userZoomSpeed then db.userZoomSpeed = GetCVar("cameraZoomSpeed") end
+        SetCVar("cameraZoomSpeed", speed)
+        zoomSpeed = speed
+    end
     zoomingCamera = true
     if change > 0 then CameraZoomOut(change) else CameraZoomIn(-change) end
     zoomingCamera = false
+    debugLog(("  zoomed %s %.2f at speed %.1f"):format(change > 0 and "out" or "in", math.abs(change), speed))
 
-    local duration = math.abs(change) / speed
+    local duration = travel / speed
     cameraTarget, cameraUntil = distance, GetTime() + duration
-    speedToken = speedToken + 1
-    local token = speedToken
-    C_Timer.After(duration + 0.2, function()
-        if token == speedToken then restoreZoomSpeed() end
-    end)
+    checkLanding(distance, duration + 0.2, manualZooms, isCorrection)
 end
 
 ---------------------------------------------------------------------------
@@ -295,6 +475,7 @@ local function updateChannel(channel, now, inCombat)
     if owner == channel.owner then return end
     local previous = channel.owner
     channel.owner = owner
+    debugLog(("%s owner: %s -> %s"):format(channel.enabledKey, tostring(previous), tostring(owner)))
 
     if owner then
         -- Remember where it was before the first trigger took it
@@ -317,7 +498,16 @@ end
 
 local endedAt = {} -- trigger -> when it stopped going on; it still counts until its end delay has passed
 
+local lastLogged -- /dcz debug: the last camera reading logged
+
 local function poll()
+    if db.debug then
+        local reading = GetCameraZoom()
+        if not lastLogged or math.abs(reading - lastLogged) > 0.05 then
+            debugLog(("camera %.2f"):format(reading))
+            lastLogged = reading
+        end
+    end
     local now = currentTriggers()
     local time = GetTime()
     for id in pairs(startedAt) do
@@ -341,12 +531,13 @@ local function poll()
 end
 
 -- The player zooming the camera (mouse wheel, keys) or minimap (its zoom buttons) themselves
-hooksecurefunc("CameraZoomIn", function()
-    if not zoomingCamera and channels.camera.owner then channels.camera.manual = true end
-end)
-hooksecurefunc("CameraZoomOut", function()
-    if not zoomingCamera and channels.camera.owner then channels.camera.manual = true end
-end)
+local function playerZoomed()
+    if zoomingCamera then return end
+    manualZooms = manualZooms + 1
+    if channels.camera.owner then channels.camera.manual = true end
+end
+hooksecurefunc("CameraZoomIn", playerZoomed)
+hooksecurefunc("CameraZoomOut", playerZoomed)
 if Minimap then
     hooksecurefunc(Minimap, "SetZoom", function()
         if not zoomingMinimap and channels.minimap.owner then channels.minimap.manual = true end
@@ -433,6 +624,11 @@ triggersTab:Slider("Minimap Zoom Step", 0, 0.5, 0.05,
     function(value) return value == 0 and "Instant" or ("%.2f sec"):format(value) end,
     "How long the minimap takes for each zoom level it passes through, at most (a short transition can make it "
         .. "quicker). Instant jumps straight to the level.")
+triggersTab:Dropdown("Camera Easing", {
+    { value = "linear", label = "Linear", tooltip = "One steady speed, start to stop (the game's own zoom)." },
+    { value = "out", label = "Ease Out", tooltip = "Starts quickly and slows down as it arrives." },
+}, function() return db and db.easing end, function(value) db.easing = value end,
+    "How camera zooms speed up and slow down over their transition time. The minimap's steps aren't eased.")
 
 local selected = TRIGGERS[1]
 local function setting(key)
@@ -446,7 +642,9 @@ local function seconds(value) return ("%.1f sec"):format(value) end
 triggersTab:Header("Trigger Settings")
 local triggerOptions = {}
 for _, id in ipairs(TRIGGERS) do
-    triggerOptions[#triggerOptions + 1] = { value = id, label = TRIGGER_NAMES[id], tooltip = "Zooms " .. TRIGGER_TEXT[id] .. "." }
+    triggerOptions[#triggerOptions + 1] = {
+        value = id, label = TRIGGER_NAMES[id], tooltip = "Zooms " .. TRIGGER_TEXT[id] .. ".",
+    }
 end
 triggersTab:Dropdown("Settings For", triggerOptions,
     function() return selected end,
@@ -567,6 +765,12 @@ SlashCmdList["DYNAMICCAMERAZOOM"] = function(msg)
         tracing = not tracing
         lastTraced, pendingText = tracing and zoomText() or nil, nil
         print("Dynamic Camera Zoom: trace " .. (tracing and ("on - " .. zoomText()) or "off") .. ".")
+    elseif msg == "debug" then
+        db.debug = not db.debug or nil
+        print("Dynamic Camera Zoom: debug log " .. (db.debug and "on (saved on /reload or logout)" or "off") .. ".")
+    elseif msg == "debug clear" then
+        db.debugLog = nil
+        print("Dynamic Camera Zoom: debug log cleared.")
     elseif msg == "fishing" then
         printCasting()
     else
@@ -625,6 +829,8 @@ events:SetScript("OnEvent", function(self, event, arg1)
             if db[key] == nil then db[key] = value end
         end
         db.priority = fixPriority(db.priority)
+        -- Ease In and Ease In-Out were taken out (a zoom out can't start slowly, see CURVES): they become Ease Out
+        if db.easing ~= "linear" and db.easing ~= "out" then db.easing = "out" end
         -- The game closed or reloaded mid-zoom: put the player's own zoom speed back
         restoreZoomSpeed()
         page:Refresh()
