@@ -124,18 +124,26 @@ local zoomCamera
 --- Call back once the camera stops moving (or after a few seconds). The player's zoom speed can only go back with the
 --- camera at rest: a zoom is kept as time, so putting the speed back while the player's mouse wheel zoom (given at our
 --- slow speed) was moving made it go many times as far (tested: 2 wheel clicks out went from 6 to past 18).
+--- At rest means unchanged for STILL_FOR seconds: a single reading can come in the same frame (tested: it caught a
+--- wheel zoom just starting and put the speed back under it).
+local STILL_FOR = 0.15
 local stillFrame = CreateFrame("Frame")
 stillFrame:Hide()
 local function whenStill(callback)
-    local last, waited = GetCameraZoom(), 0
+    local last, stillFor, waited = GetCameraZoom(), 0, 0
     stillFrame:SetScript("OnUpdate", function(self, elapsed)
         local now = GetCameraZoom()
         waited = waited + elapsed
-        if math.abs(now - last) < 0.001 or waited > 5 then
+        if math.abs(now - last) < 0.0005 then
+            stillFor = stillFor + elapsed
+        else
+            stillFor = 0
+        end
+        last = now
+        if stillFor >= STILL_FOR or waited > 10 then
             self:Hide()
             callback()
         end
-        last = now
     end)
     stillFrame:Show()
 end
