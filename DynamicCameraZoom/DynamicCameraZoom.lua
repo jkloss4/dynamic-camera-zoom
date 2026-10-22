@@ -121,20 +121,42 @@ local zoomCamera
 
 --- After a zoom of ours should be done: put the player's zoom speed back, and check where the camera got to; if it's
 --- off (and the player hasn't zoomed since), correct it once
+--- Call back once the camera stops moving (or after a few seconds). The player's zoom speed can only go back with the
+--- camera at rest: a zoom is kept as time, so putting the speed back while the player's mouse wheel zoom (given at our
+--- slow speed) was moving made it go many times as far (tested: 2 wheel clicks out went from 6 to past 18).
+local stillFrame = CreateFrame("Frame")
+stillFrame:Hide()
+local function whenStill(callback)
+    local last, waited = GetCameraZoom(), 0
+    stillFrame:SetScript("OnUpdate", function(self, elapsed)
+        local now = GetCameraZoom()
+        waited = waited + elapsed
+        if math.abs(now - last) < 0.001 or waited > 5 then
+            self:Hide()
+            callback()
+        end
+        last = now
+    end)
+    stillFrame:Show()
+end
+
 local function checkLanding(distance, wait, manualAtStart, isCorrection)
     speedToken = speedToken + 1
     local token = speedToken
     C_Timer.After(wait, function()
         if token ~= speedToken then return end -- a newer zoom took over
-        restoreZoomSpeed()
-        zoomSpeed = nil
-        debugLog(("  check: at %.2f, wanted %.2f, manual zooms since %d"):format(GetCameraZoom(), distance,
-            manualZooms - manualAtStart))
-        local off = math.abs(GetCameraZoom() - distance) > CORRECT_OVER
-        if not isCorrection and manualZooms == manualAtStart and off then
-            cameraTarget = nil -- it went somewhere else: go by where it really is
-            zoomCamera(distance, 0.2, true)
-        end
+        whenStill(function()
+            if token ~= speedToken then return end
+            restoreZoomSpeed()
+            zoomSpeed = nil
+            debugLog(("  check: at %.2f, wanted %.2f, manual zooms since %d"):format(GetCameraZoom(), distance,
+                manualZooms - manualAtStart))
+            local off = math.abs(GetCameraZoom() - distance) > CORRECT_OVER
+            if not isCorrection and manualZooms == manualAtStart and off then
+                cameraTarget = nil -- it went somewhere else: go by where it really is
+                zoomCamera(distance, 0.2, true)
+            end
+        end)
     end)
 end
 
@@ -275,7 +297,8 @@ zoomCamera = function(distance, transition, isCorrection)
     local change = distance - cameraDistance()
     -- A zoom the other way drops the rest of the one in progress (tested: zooming out 8 while a zoom in still had
     -- 4.7 to go went 8 out from where the camera was, not 3.3), so it goes by where the camera is, at its own speed.
-    if inProgress and (cameraTarget - GetCameraZoom()) * (distance - GetCameraZoom()) < 0 then
+    -- The way is the zoom's own (from where the camera's headed), not where it ends up from where the camera is.
+    if inProgress and (cameraTarget - GetCameraZoom()) * change < 0 then
         inProgress = false
         change = distance - GetCameraZoom()
     end
