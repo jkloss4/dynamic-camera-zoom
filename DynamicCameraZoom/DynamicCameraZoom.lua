@@ -229,6 +229,7 @@ local function easeStep()
         return
     end
     local now = GetTime()
+    if now == current.created then return end -- its first speed was set this frame (see startEase)
     local index = current.index
     -- The next segment starts when the last one ends (the first at the start)
     local startsAt = current.start + (index > 0 and current.times[index] or 0)
@@ -289,11 +290,19 @@ local function startEase(distance, transition)
     end
     ease = { to = distance, step = range / segments, times = times, start = math.max(now, startAt), index = 0,
         pos = from, sentAt = 0, manual = manualZooms }
+    -- Nothing of ours moving: the first segment's speed is set now, as a new speed takes a frame to apply (see
+    -- zoomCamera) and the segment goes next frame
+    if startAt <= now then
+        local speed = math.abs(ease.step) / math.max(times[1], 0.001)
+        SetCVar("cameraZoomSpeed", math.max(0.05, math.min(MAX_ZOOM_SPEED, speed)))
+        ease.created = now
+    end
     cameraTarget, cameraUntil = from, now + transition + EASE_CATCH_UP
     debugLog(("  eased (%s) from %.2f over %.1fs in %d segments"):format(db.easing, from, transition, segments))
     easeFrame:Show()
 end
 
+local issueToken = 0 -- the zoom waiting a frame for its speed (see zoomCamera); bumped to call it off
 local pendingZoom -- a zoom waiting for the player's own zoom to stop: { distance, transition, isCorrection }
 local onPlayerStill -- set below: runs when the player's zoom has stopped, before the zoom that waited for it
 
@@ -341,7 +350,8 @@ zoomCamera = function(distance, transition, isCorrection, isRestore)
     -- A zoom the other way drops the rest of the one in progress (tested: zooming out 8 while a zoom in still had
     -- 4.7 to go went 8 out from where the camera was, not 3.3), so it goes by where the camera is, at its own speed.
     -- The way is the zoom's own (from where the camera's headed), not where it ends up from where the camera is.
-    if inProgress and (cameraTarget - GetCameraZoom()) * change < 0 then
+    local reverses = inProgress and (cameraTarget - GetCameraZoom()) * change < 0
+    if reverses then
         inProgress = false
         change = distance - GetCameraZoom()
     end
@@ -349,7 +359,7 @@ zoomCamera = function(distance, transition, isCorrection, isRestore)
 
     -- The speed is for the glide from where the camera really is; kept as it is while a zoom of ours is moving
     local travel = math.abs(distance - GetCameraZoom())
-    local speed
+    local speed, newSpeed
     if inProgress and zoomSpeed then
         speed = zoomSpeed
     else
@@ -357,17 +367,30 @@ zoomCamera = function(distance, transition, isCorrection, isRestore)
         speed = math.max(speed, 1)
         -- Saved before the first change, so it's put back even if the game closes mid-zoom (ADDON_LOADED)
         if not db.userZoomSpeed then db.userZoomSpeed = GetCVar("cameraZoomSpeed") end
+        newSpeed = tonumber(GetCVar("cameraZoomSpeed")) ~= speed
         SetCVar("cameraZoomSpeed", speed)
         zoomSpeed = speed
     end
-    zoomingCamera = true
-    if change > 0 then CameraZoomOut(change) else CameraZoomIn(-change) end
-    zoomingCamera = false
-    debugLog(("  zoomed %s %.2f at speed %.1f"):format(change > 0 and "out" or "in", math.abs(change), speed))
 
-    local duration = travel / speed
-    cameraTarget, cameraUntil = distance, GetTime() + duration
-    checkLanding(distance, duration + 0.2, manualZooms, isCorrection)
+    -- A new speed takes a frame to apply: a zoom given with it moved its first frame at the old speed, a jump at the
+    -- start (zooms out from rest jumped up to a yard at the player's own speed; one that kept its speed didn't). So
+    -- with a new speed, the zoom goes a frame later.
+    issueToken = issueToken + 1
+    local token = issueToken
+    local function issue()
+        if token ~= issueToken then return end -- a newer zoom (or the player) took over
+        -- the other way: from where the camera is now
+        if reverses then change = distance - GetCameraZoom() end
+        zoomingCamera = true
+        if change > 0 then CameraZoomOut(change) elseif change < 0 then CameraZoomIn(-change) end
+        zoomingCamera = false
+        debugLog(("  zoomed %s %.2f at speed %.1f%s"):format(change > 0 and "out" or "in", math.abs(change), speed,
+            newSpeed and " (a frame after setting it)" or ""))
+        local duration = travel / speed
+        cameraTarget, cameraUntil = distance, GetTime() + duration
+        checkLanding(distance, duration + 0.2, manualZooms, isCorrection)
+    end
+    if newSpeed then C_Timer.After(0, issue) else issue() end
 end
 
 ---------------------------------------------------------------------------
@@ -642,6 +665,7 @@ local function playerZoom(direction, amount, ...)
         local moving = cameraTarget and GetTime() < cameraUntil and math.abs(cameraTarget - at) > 0.01
         local ours = moving and (cameraTarget > at and 1 or -1)
         stopEase()
+        issueToken = issueToken + 1 -- nor one waiting a frame for its speed
         speedToken = speedToken + 1 -- no landing check: the player has it
         zoomSpeed, cameraTarget = nil, nil
         if ours == direction then
