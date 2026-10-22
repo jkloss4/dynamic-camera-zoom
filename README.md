@@ -28,7 +28,7 @@ that zooms them; when none does any more, they go back to where they were before
 Options > AddOns > Dynamic Camera Zoom (or `/dcz`). On the **Triggers** tab:
 
 - **Respect Manual Zoom:** if you zoom the camera or minimap yourself while a trigger has zoomed it, it isn't put back
-  when the trigger ends.
+  when the trigger ends. (Zooming the camera yourself just as a trigger ends always keeps your zoom.)
 - **Wait Out Combat:** other triggers don't zoom until combat ends (the Combat trigger still does).
 - **Minimap Zoom Step:** the most time the minimap takes for each zoom level it passes through (Instant to 0.5 sec).
 - **Camera Easing:** Linear (one steady speed, the game's own) or Ease Out (the default: starts quickly, slows as it

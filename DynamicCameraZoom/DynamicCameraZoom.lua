@@ -297,10 +297,17 @@ end
 local pendingZoom -- a zoom waiting for the player's own zoom to stop: { distance, transition, isCorrection }
 local onPlayerStill -- set below: runs when the player's zoom has stopped, before the zoom that waited for it
 
-zoomCamera = function(distance, transition, isCorrection)
+zoomCamera = function(distance, transition, isCorrection, isRestore)
     -- Just after the player zoomed, their zoom may still be moving: changing the speed under it would stretch it, and
     -- where it's headed isn't known. So the zoom waits for the camera to stop, and then goes from where it is.
+    -- Going back to where it was isn't done at all: the player zooming as a trigger ends is them picking where it goes
+    -- (waiting and then going back looked like a phantom zoom undoing theirs).
     if GetTime() - lastManualAt < MANUAL_SETTLE then
+        if isRestore then
+            pendingZoom = nil
+            debugLog(("going back to %.1f skipped: you're zooming"):format(distance))
+            return
+        end
         local waiting = pendingZoom
         pendingZoom = { distance, transition, isCorrection }
         if not waiting then
@@ -499,7 +506,7 @@ local channels = {
         enabledKey = "camera",
         target = function(settings) return settings.cameraDistance end,
         current = function() return cameraDistance() end,
-        zoom = function(value, transition) zoomCamera(value, transition) end,
+        zoom = function(value, transition, isRestore) zoomCamera(value, transition, false, isRestore) end,
     },
     minimap = {
         enabledKey = "minimap",
@@ -557,7 +564,7 @@ local function updateChannel(channel, now, inCombat)
         -- None zooms it any more: back to where it was, if the last one restores and the player didn't zoom it
         local settings = db[previous]
         if settings.restore and channel.saved and not (db.respectManualZoom and channel.manual) then
-            channel.zoom(channel.saved, settings.endTransition)
+            channel.zoom(channel.saved, settings.endTransition, true)
         end
         channel.saved, channel.saveWhenStill = nil, nil
     end
