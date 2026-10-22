@@ -52,9 +52,11 @@ it), for tracking down a zoom that lands in the wrong place.
 
 The game only lets addons zoom the camera by an amount, at the speed of its camera zoom speed setting. For each zoom
 the addon sets that speed so the zoom takes the transition time, then puts your own speed back (also at the next login,
-if the game closes mid-zoom). A zoom that starts while another is still moving keeps that one's speed: changing the
-speed mid-zoom makes the game miscount what's left of it. When a zoom should be done it's checked, and corrected once if
-it landed somewhere else (unless you zoomed yourself in the meantime).
+if the game closes mid-zoom). The game keeps what's left of a zoom as time, so changing the speed mid-zoom makes it go
+farther or shorter. So a zoom that starts while another is still moving keeps that one's speed (one the other way
+replaces it, from where the camera is), your speed goes back only once the camera has stopped, and a zoom that comes
+just after you zoomed yourself waits for your zoom to stop. When a zoom should be done it's checked, and corrected once
+if it landed somewhere else (unless you zoomed yourself in the meantime).
 
 The game's zoom has no curve, so an eased zoom is drawn with straight segments of equal distance (about a fifth of a
 yard each), each one zoom: the curve sets how long each takes, so they're fast at the start and slow toward the end.

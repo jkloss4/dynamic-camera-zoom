@@ -119,35 +119,42 @@ local zoomSpeed -- the speed our zoom in progress was given
 --- checked, and if it's off (and the player hasn't zoomed since), corrected once.
 local zoomCamera
 
+--- A waiter: call it with a callback to have that called once the camera stops moving (or after 10 seconds); a newer
+--- callback replaces one still waiting. The zoom speed can only change with the camera at rest: a zoom is kept as time,
+--- so putting the player's speed back while their mouse wheel zoom (given at our slow speed) was moving made it go many
+--- times as far (tested: 2 wheel clicks out went from 6 to past 18). At rest means unchanged for STILL_FOR seconds: a
+--- single reading can come in the same frame (tested: it caught a wheel zoom just starting).
+local STILL_FOR = 0.15
+local function stillWaiter()
+    local frame = CreateFrame("Frame")
+    frame:Hide()
+    return function(callback)
+        local last, stillFor, waited = GetCameraZoom(), 0, 0
+        frame:SetScript("OnUpdate", function(self, elapsed)
+            local now = GetCameraZoom()
+            waited = waited + elapsed
+            if math.abs(now - last) < 0.0005 then
+                stillFor = stillFor + elapsed
+            else
+                stillFor = 0
+            end
+            last = now
+            if stillFor >= STILL_FOR or waited > 10 then
+                self:Hide()
+                callback()
+            end
+        end)
+        frame:Show()
+    end
+end
+local whenStill = stillWaiter() -- for checkLanding
+local whenPlayerStill = stillWaiter() -- for a zoom asked while the player's own zoom may be moving
+
+local lastManualAt = 0 -- when the player last zoomed the camera themselves
+local MANUAL_SETTLE = 2 -- seconds a player's zoom might still be moving (a wheel click at a slow speed)
+
 --- After a zoom of ours should be done: put the player's zoom speed back, and check where the camera got to; if it's
 --- off (and the player hasn't zoomed since), correct it once
---- Call back once the camera stops moving (or after a few seconds). The player's zoom speed can only go back with the
---- camera at rest: a zoom is kept as time, so putting the speed back while the player's mouse wheel zoom (given at our
---- slow speed) was moving made it go many times as far (tested: 2 wheel clicks out went from 6 to past 18).
---- At rest means unchanged for STILL_FOR seconds: a single reading can come in the same frame (tested: it caught a
---- wheel zoom just starting and put the speed back under it).
-local STILL_FOR = 0.15
-local stillFrame = CreateFrame("Frame")
-stillFrame:Hide()
-local function whenStill(callback)
-    local last, stillFor, waited = GetCameraZoom(), 0, 0
-    stillFrame:SetScript("OnUpdate", function(self, elapsed)
-        local now = GetCameraZoom()
-        waited = waited + elapsed
-        if math.abs(now - last) < 0.0005 then
-            stillFor = stillFor + elapsed
-        else
-            stillFor = 0
-        end
-        last = now
-        if stillFor >= STILL_FOR or waited > 10 then
-            self:Hide()
-            callback()
-        end
-    end)
-    stillFrame:Show()
-end
-
 local function checkLanding(distance, wait, manualAtStart, isCorrection)
     speedToken = speedToken + 1
     local token = speedToken
@@ -287,7 +294,28 @@ local function startEase(distance, transition)
     easeFrame:Show()
 end
 
+local pendingZoom -- a zoom waiting for the player's own zoom to stop: { distance, transition, isCorrection }
+local onPlayerStill -- set below: runs when the player's zoom has stopped, before the zoom that waited for it
+
 zoomCamera = function(distance, transition, isCorrection)
+    -- Just after the player zoomed, their zoom may still be moving: changing the speed under it would stretch it, and
+    -- where it's headed isn't known. So the zoom waits for the camera to stop, and then goes from where it is.
+    if GetTime() - lastManualAt < MANUAL_SETTLE then
+        local waiting = pendingZoom
+        pendingZoom = { distance, transition, isCorrection }
+        if not waiting then
+            debugLog(("zoom to %.1f waits for your zoom to stop"):format(distance))
+            whenPlayerStill(function()
+                local zoom = pendingZoom
+                pendingZoom = nil
+                lastManualAt = 0
+                onPlayerStill()
+                if zoom then zoomCamera(zoom[1], zoom[2], zoom[3]) end
+            end)
+        end
+        return
+    end
+    pendingZoom = nil
     local inProgress = cameraTarget and GetTime() < cameraUntil
     debugLog(("zoom asked: to %.1f over %.1fs%s (headed %.2f, at %.2f, mounted %s, in progress %s)"):format(distance,
         transition, isCorrection and " CORRECTION" or "", cameraDistance(), GetCameraZoom(), tostring(IsMounted()),
@@ -518,6 +546,8 @@ local function updateChannel(channel, now, inCombat)
         -- Remember where it was before the first trigger took it
         if not previous then
             channel.saved, channel.manual = channel.current(), false
+            -- The player's own zoom may still be moving: where it stops is where to go back to (see zoomCamera)
+            channel.saveWhenStill = channel == channels.camera and GetTime() - lastManualAt < MANUAL_SETTLE
         end
         -- Handing over from a trigger that ended goes at that one's end speed; otherwise at the new one's start speed
         local transition = (previous and not now[previous]) and db[previous].endTransition
@@ -529,7 +559,14 @@ local function updateChannel(channel, now, inCombat)
         if settings.restore and channel.saved and not (db.respectManualZoom and channel.manual) then
             channel.zoom(channel.saved, settings.endTransition)
         end
-        channel.saved = nil
+        channel.saved, channel.saveWhenStill = nil, nil
+    end
+end
+
+onPlayerStill = function()
+    local camera = channels.camera
+    if camera.saveWhenStill then
+        camera.saved, camera.saveWhenStill = GetCameraZoom(), nil
     end
 end
 
@@ -571,6 +608,10 @@ end
 local function playerZoomed()
     if zoomingCamera then return end
     manualZooms = manualZooms + 1
+    -- Where our zoom was headed no longer says where the camera's going (the player's zoom adds to it, or drops it if
+    -- it goes the other way): the next zoom waits for the camera to stop and goes from there (see zoomCamera)
+    lastManualAt = GetTime()
+    cameraTarget = nil
     if channels.camera.owner then channels.camera.manual = true end
 end
 hooksecurefunc("CameraZoomIn", playerZoomed)
