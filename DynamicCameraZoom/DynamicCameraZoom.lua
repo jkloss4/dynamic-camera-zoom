@@ -890,7 +890,7 @@ local TEST_VARIANTS = {
 
 local testFrame = CreateFrame("Frame")
 testFrame:Hide()
-local testWaitStill = stillWaiter()
+
 
 local function runZoomTest()
     local userSpeed = GetCVar("cameraZoomSpeed")
@@ -915,12 +915,16 @@ local function runZoomTest()
             log("done")
             return
         end
-        -- to 8 yd quickly, then out 4 at 1 yd/s
+        -- to 8 yd quickly (fixed waits: a zoom can take a moment to start moving, which fooled a still check), then out
+        -- 4 at 1 yd/s
         SetCVar("cameraZoomSpeed", 20)
         zoomBy(8 - GetCameraZoom())
-        testWaitStill(function()
+        C_Timer.After(3, function()
+            local start = GetCameraZoom()
             SetCVar("cameraZoomSpeed", 1)
             zoomBy(4)
+            local before
+            C_Timer.After(0.5, function() before = GetCameraZoom() end)
             C_Timer.After(0.6, function()
                 local at = GetCameraZoom()
                 local step = 0
@@ -931,10 +935,11 @@ local function runZoomTest()
                     zoomingCamera = false
                     if step == #variant.steps then
                         self:Hide()
-                        testWaitStill(function()
+                        C_Timer.After(4, function()
                             local final = GetCameraZoom()
-                            log(("%s: stopped at %.2f, ended %.2f (want %.2f) %s"):format(variant.name, at, final,
-                                at + 1, math.abs(final - (at + 1)) < 0.3 and "OK" or "WRONG"))
+                            log(("%s: start %.2f, moving %.2f->%.2f, ended %.2f (want %.2f) %s"):format(variant.name,
+                                start, before or -1, at, final, at + 1,
+                                math.abs(final - (at + 1)) < 0.3 and "OK" or "WRONG"))
                             nextVariant()
                         end)
                     end
