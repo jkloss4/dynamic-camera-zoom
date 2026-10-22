@@ -106,7 +106,7 @@ local function debugLog(text)
     while #log > 400 do table.remove(log, 1) end
 end
 
-local manualZooms = 0 -- counts the player's own camera zooms (see the CameraZoomIn/Out hooks)
+local manualZooms = 0 -- counts the player's own camera zooms (see playerZoom)
 local CORRECT_OVER = 0.5 -- yards a finished zoom can be off before it's corrected
 
 local zoomSpeed -- the speed our zoom in progress was given
@@ -605,45 +605,63 @@ local function poll()
 end
 
 -- The player zooming the camera (mouse wheel, keys) or minimap (its zoom buttons) themselves
-local TAKEOVER_NUDGE = 0.1 -- yards: a zoom the other way that only drops the rest of the one moving (see playerZoomed)
+--
+-- If the player zooms while our speed is set, ours stops where the camera is and theirs goes from there at their own
+-- speed. That has to happen before their zoom reaches the game, so CameraZoomIn/Out are wrapped (not just hooked):
+-- the game keeps a zoom as time, so one given at our slow speed got stretched when their speed went back (tested: 3
+-- wheel clicks went from 7 to past 23), and a speed change in the same frame as zooms stretches them all (tested). What
+-- works (tested): a zoom the other way stops the one moving and goes from where the camera is; then, a frame later,
+-- their speed goes back and their zoom goes. A zoom of theirs the other way from ours stops ours itself.
+local TAKEOVER_NUDGE = 0.1 -- yards: the small zoom the other way that stops ours
+local gameZoomIn, gameZoomOut = CameraZoomIn, CameraZoomOut
+local heldZooms -- the player's zooms waiting a frame for ours to stop: { direction, amount }...
 
-local function playerZoomed(amount, direction)
-    if zoomingCamera then return end
+local function gameZoom(direction, amount, ...)
+    if direction > 0 then return gameZoomOut(amount, ...) end
+    return gameZoomIn(amount, ...)
+end
+
+local function playerZoom(direction, amount, ...)
+    if zoomingCamera then return gameZoom(direction, amount, ...) end
     manualZooms = manualZooms + 1
     if channels.camera.owner then channels.camera.manual = true end
     lastManualAt = GetTime()
-
-    -- The player zoomed while our speed is set: their zoom went at our (slow) speed, and putting their speed back
-    -- later stretched it (tested: 69 wheel clicks crawled out at 1 yd/s, then shot to the max when the speed went
-    -- back). So ours stops where the camera is, their speed goes back, and their zoom goes from there. A zoom the other
-    -- way drops the rest of the one moving and goes from where the camera is (tested), so a small one the other way and
-    -- then one back to their target does it.
-    if db and db.userZoomSpeed and type(amount) == "number" and amount > 0 then
+    if heldZooms then
+        heldZooms[#heldZooms + 1] = { direction, amount }
+        return
+    end
+    if db and db.userZoomSpeed then
         local at = GetCameraZoom()
-        local target = math.max(0, math.min(at + direction * amount, maxCameraDistance()))
+        local moving = cameraTarget and GetTime() < cameraUntil and math.abs(cameraTarget - at) > 0.01
+        local ours = moving and (cameraTarget > at and 1 or -1)
         stopEase()
-        speedToken = speedToken + 1 -- no check: the player has it
-        restoreZoomSpeed()
-        zoomSpeed = nil
-        local change = target - at
-        zoomingCamera = true
-        if change > 0 then
-            CameraZoomIn(TAKEOVER_NUDGE)
-            CameraZoomOut(change)
-        elseif change < 0 then
-            CameraZoomOut(TAKEOVER_NUDGE)
-            CameraZoomIn(-change)
+        speedToken = speedToken + 1 -- no landing check: the player has it
+        zoomSpeed, cameraTarget = nil, nil
+        if ours == direction then
+            debugLog(("you zoomed %s during ours: stopped at %.2f, yours goes next frame"):format(
+                direction > 0 and "out" or "in", at))
+            zoomingCamera = true
+            gameZoom(-direction, TAKEOVER_NUDGE)
+            zoomingCamera = false
+            heldZooms = { { direction, amount } }
+            C_Timer.After(0, function()
+                local zooms = heldZooms
+                heldZooms = nil
+                restoreZoomSpeed()
+                for _, zoom in ipairs(zooms) do gameZoom(zoom[1], zoom[2]) end
+            end)
+            return
         end
-        zoomingCamera = false
-        debugLog(("you zoomed %s %.1f during ours: ours stopped, your speed back, from %.2f to %.2f"):format(
-            direction > 0 and "out" or "in", amount, at, target))
+        debugLog(("you zoomed %s during ours (at %.2f): your speed back"):format(direction > 0 and "out" or "in", at))
+        restoreZoomSpeed()
     end
     -- Where our zoom was headed no longer says where the camera's going: the next zoom waits for the camera to stop and
     -- goes from there (see zoomCamera)
     cameraTarget = nil
+    return gameZoom(direction, amount, ...)
 end
-hooksecurefunc("CameraZoomIn", function(amount) playerZoomed(amount, -1) end)
-hooksecurefunc("CameraZoomOut", function(amount) playerZoomed(amount, 1) end)
+CameraZoomIn = function(amount, ...) return playerZoom(-1, amount, ...) end
+CameraZoomOut = function(amount, ...) return playerZoom(1, amount, ...) end
 if Minimap then
     hooksecurefunc(Minimap, "SetZoom", function()
         if not zoomingMinimap and channels.minimap.owner then channels.minimap.manual = true end
@@ -861,97 +879,6 @@ end
 
 Kit.Register(page)
 
--- /dcz test (temporary): tries ways of stopping a zoom that's moving at a slow speed and going on at the player's
--- speed, to find one that doesn't stretch. Each starts at 8 yd zooming out 4 at 1 yd/s; after 0.6 s it stops it and
--- zooms out 1 (as a wheel click) at 20 yd/s. Success: it ends 1 yd past where it was stopped. Logged to db.testLog.
-local TEST_VARIANTS = {
-    -- before the wheel click reaches the game (if the click could be caught first)
-    { name = "P1 nudge, speed, click (same frame)", steps = {
-        function() CameraZoomIn(0.1); SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
-    { name = "P2 nudge | speed, click", steps = {
-        function() CameraZoomIn(0.1) end,
-        function() SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
-    -- after the wheel click reached the game at the slow speed (as the hook sees it now)
-    { name = "H1 click, speed, nudge, out (same frame: current)", steps = {
-        function() CameraZoomOut(1); SetCVar("cameraZoomSpeed", 20); CameraZoomIn(0.1); CameraZoomOut(1) end } },
-    { name = "H2 click, nudge | speed, out", steps = {
-        function() CameraZoomOut(1); CameraZoomIn(0.1) end,
-        function() SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
-    { name = "H3 click | nudge | speed, out", steps = {
-        function() CameraZoomOut(1) end,
-        function() CameraZoomIn(0.1) end,
-        function() SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
-    { name = "H4 click | nudge | out | speed", steps = {
-        function() CameraZoomOut(1) end,
-        function() CameraZoomIn(0.1) end,
-        function() CameraZoomOut(1) end,
-        function() SetCVar("cameraZoomSpeed", 20) end } },
-}
-
-local testFrame = CreateFrame("Frame")
-testFrame:Hide()
-
-
-local function runZoomTest()
-    local userSpeed = GetCVar("cameraZoomSpeed")
-    db.testLog = {}
-    local function log(text)
-        db.testLog[#db.testLog + 1] = ("%.2f %s"):format(GetTime() % 1000, text)
-        print("DCZ test: " .. text)
-    end
-    local function zoomBy(change)
-        zoomingCamera = true
-        if change > 0 then CameraZoomOut(change) elseif change < 0 then CameraZoomIn(-change) end
-        zoomingCamera = false
-    end
-    poller:Hide() -- triggers stay out of it
-    local index = 0
-    local function nextVariant()
-        index = index + 1
-        local variant = TEST_VARIANTS[index]
-        if not variant then
-            SetCVar("cameraZoomSpeed", userSpeed)
-            poller:Show()
-            log("done")
-            return
-        end
-        -- to 8 yd quickly (fixed waits: a zoom can take a moment to start moving, which fooled a still check), then out
-        -- 4 at 1 yd/s
-        SetCVar("cameraZoomSpeed", 20)
-        zoomBy(8 - GetCameraZoom())
-        C_Timer.After(3, function()
-            local start = GetCameraZoom()
-            SetCVar("cameraZoomSpeed", 1)
-            zoomBy(4)
-            local before
-            C_Timer.After(0.5, function() before = GetCameraZoom() end)
-            C_Timer.After(0.6, function()
-                local at = GetCameraZoom()
-                local step = 0
-                testFrame:SetScript("OnUpdate", function(self)
-                    step = step + 1
-                    zoomingCamera = true
-                    variant.steps[step]()
-                    zoomingCamera = false
-                    if step == #variant.steps then
-                        self:Hide()
-                        C_Timer.After(4, function()
-                            local final = GetCameraZoom()
-                            log(("%s: start %.2f, moving %.2f->%.2f, ended %.2f (want %.2f) %s"):format(variant.name,
-                                start, before or -1, at, final, at + 1,
-                                math.abs(final - (at + 1)) < 0.3 and "OK" or "WRONG"))
-                            nextVariant()
-                        end)
-                    end
-                end)
-                testFrame:Show()
-            end)
-        end)
-    end
-    log("starting: stand still, don't zoom")
-    nextVariant()
-end
-
 SLASH_DYNAMICCAMERAZOOM1 = "/dynamiccamerazoom"
 SLASH_DYNAMICCAMERAZOOM2 = "/dcz"
 SlashCmdList["DYNAMICCAMERAZOOM"] = function(msg)
@@ -970,8 +897,6 @@ SlashCmdList["DYNAMICCAMERAZOOM"] = function(msg)
         print("Dynamic Camera Zoom: debug log cleared.")
     elseif msg == "fishing" then
         printCasting()
-    elseif msg == "test" then
-        runZoomTest()
     else
         Kit.Open(page)
     end
@@ -1032,6 +957,7 @@ events:SetScript("OnEvent", function(self, event, arg1)
         if db.easing ~= "linear" and db.easing ~= "out" then db.easing = "out" end
         -- The game closed or reloaded mid-zoom: put the player's own zoom speed back
         restoreZoomSpeed()
+        db.testLog = nil -- left by a test build
         page:Refresh()
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- Start fresh after a loading screen
