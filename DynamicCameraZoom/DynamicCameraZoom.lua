@@ -861,6 +861,92 @@ end
 
 Kit.Register(page)
 
+-- /dcz test (temporary): tries ways of stopping a zoom that's moving at a slow speed and going on at the player's
+-- speed, to find one that doesn't stretch. Each starts at 8 yd zooming out 4 at 1 yd/s; after 0.6 s it stops it and
+-- zooms out 1 (as a wheel click) at 20 yd/s. Success: it ends 1 yd past where it was stopped. Logged to db.testLog.
+local TEST_VARIANTS = {
+    -- before the wheel click reaches the game (if the click could be caught first)
+    { name = "P1 nudge, speed, click (same frame)", steps = {
+        function() CameraZoomIn(0.1); SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
+    { name = "P2 nudge | speed, click", steps = {
+        function() CameraZoomIn(0.1) end,
+        function() SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
+    -- after the wheel click reached the game at the slow speed (as the hook sees it now)
+    { name = "H1 click, speed, nudge, out (same frame: current)", steps = {
+        function() CameraZoomOut(1); SetCVar("cameraZoomSpeed", 20); CameraZoomIn(0.1); CameraZoomOut(1) end } },
+    { name = "H2 click, nudge | speed, out", steps = {
+        function() CameraZoomOut(1); CameraZoomIn(0.1) end,
+        function() SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
+    { name = "H3 click | nudge | speed, out", steps = {
+        function() CameraZoomOut(1) end,
+        function() CameraZoomIn(0.1) end,
+        function() SetCVar("cameraZoomSpeed", 20); CameraZoomOut(1) end } },
+    { name = "H4 click | nudge | out | speed", steps = {
+        function() CameraZoomOut(1) end,
+        function() CameraZoomIn(0.1) end,
+        function() CameraZoomOut(1) end,
+        function() SetCVar("cameraZoomSpeed", 20) end } },
+}
+
+local testFrame = CreateFrame("Frame")
+testFrame:Hide()
+local testWaitStill = stillWaiter()
+
+local function runZoomTest()
+    local userSpeed = GetCVar("cameraZoomSpeed")
+    db.testLog = {}
+    local function log(text)
+        db.testLog[#db.testLog + 1] = ("%.2f %s"):format(GetTime() % 1000, text)
+        print("DCZ test: " .. text)
+    end
+    local function zoomBy(change)
+        zoomingCamera = true
+        if change > 0 then CameraZoomOut(change) elseif change < 0 then CameraZoomIn(-change) end
+        zoomingCamera = false
+    end
+    poller:Hide() -- triggers stay out of it
+    local index = 0
+    local function nextVariant()
+        index = index + 1
+        local variant = TEST_VARIANTS[index]
+        if not variant then
+            SetCVar("cameraZoomSpeed", userSpeed)
+            poller:Show()
+            log("done")
+            return
+        end
+        -- to 8 yd quickly, then out 4 at 1 yd/s
+        SetCVar("cameraZoomSpeed", 20)
+        zoomBy(8 - GetCameraZoom())
+        testWaitStill(function()
+            SetCVar("cameraZoomSpeed", 1)
+            zoomBy(4)
+            C_Timer.After(0.6, function()
+                local at = GetCameraZoom()
+                local step = 0
+                testFrame:SetScript("OnUpdate", function(self)
+                    step = step + 1
+                    zoomingCamera = true
+                    variant.steps[step]()
+                    zoomingCamera = false
+                    if step == #variant.steps then
+                        self:Hide()
+                        testWaitStill(function()
+                            local final = GetCameraZoom()
+                            log(("%s: stopped at %.2f, ended %.2f (want %.2f) %s"):format(variant.name, at, final,
+                                at + 1, math.abs(final - (at + 1)) < 0.3 and "OK" or "WRONG"))
+                            nextVariant()
+                        end)
+                    end
+                end)
+                testFrame:Show()
+            end)
+        end)
+    end
+    log("starting: stand still, don't zoom")
+    nextVariant()
+end
+
 SLASH_DYNAMICCAMERAZOOM1 = "/dynamiccamerazoom"
 SLASH_DYNAMICCAMERAZOOM2 = "/dcz"
 SlashCmdList["DYNAMICCAMERAZOOM"] = function(msg)
@@ -879,6 +965,8 @@ SlashCmdList["DYNAMICCAMERAZOOM"] = function(msg)
         print("Dynamic Camera Zoom: debug log cleared.")
     elseif msg == "fishing" then
         printCasting()
+    elseif msg == "test" then
+        runZoomTest()
     else
         Kit.Open(page)
     end
