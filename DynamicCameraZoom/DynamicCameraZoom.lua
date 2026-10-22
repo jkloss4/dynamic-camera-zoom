@@ -150,7 +150,8 @@ end
 local whenStill = stillWaiter() -- for checkLanding
 local whenPlayerStill = stillWaiter() -- for a zoom asked while the player's own zoom may be moving
 
-local lastManualAt = 0 -- when the player last zoomed the camera themselves
+local lastManualAt = 0 -- when the player last zoomed the camera themselves (cleared once their zoom has stopped)
+local playerZoomedAt = 0 -- the same, never cleared
 local MANUAL_SETTLE = 2 -- seconds a player's zoom might still be moving (a wheel click at a slow speed)
 
 --- After a zoom of ours should be done: put the player's zoom speed back, and check where the camera got to; if it's
@@ -306,17 +307,10 @@ local issueToken = 0 -- the zoom waiting a frame for its speed (see zoomCamera);
 local pendingZoom -- a zoom waiting for the player's own zoom to stop: { distance, transition, isCorrection }
 local onPlayerStill -- set below: runs when the player's zoom has stopped, before the zoom that waited for it
 
-zoomCamera = function(distance, transition, isCorrection, isRestore)
+zoomCamera = function(distance, transition, isCorrection)
     -- Just after the player zoomed, their zoom may still be moving: changing the speed under it would stretch it, and
     -- where it's headed isn't known. So the zoom waits for the camera to stop, and then goes from where it is.
-    -- Going back to where it was isn't done at all: the player zooming as a trigger ends is them picking where it goes
-    -- (waiting and then going back looked like a phantom zoom undoing theirs).
     if GetTime() - lastManualAt < MANUAL_SETTLE then
-        if isRestore then
-            pendingZoom = nil
-            debugLog(("going back to %.1f skipped: you're zooming"):format(distance))
-            return
-        end
         local waiting = pendingZoom
         pendingZoom = { distance, transition, isCorrection }
         if not waiting then
@@ -522,6 +516,7 @@ end
 ---------------------------------------------------------------------------
 
 local startedAt = {} -- trigger -> when it started (its delay counts from there)
+local lastEnded = {} -- trigger -> when it last stopped going on (before its end delay)
 
 -- The camera and the minimap are handled the same way, each on its own
 local channels = {
@@ -529,7 +524,7 @@ local channels = {
         enabledKey = "camera",
         target = function(settings) return settings.cameraDistance end,
         current = function() return cameraDistance() end,
-        zoom = function(value, transition, isRestore) zoomCamera(value, transition, false, isRestore) end,
+        zoom = function(value, transition) zoomCamera(value, transition) end,
     },
     minimap = {
         enabledKey = "minimap",
@@ -585,9 +580,15 @@ local function updateChannel(channel, now, inCombat)
         channel.zoom(channel.target(db[owner]), transition)
     elseif previous then
         -- None zooms it any more: back to where it was, if the last one restores and the player didn't zoom it
+        -- The player zooming the camera after the trigger stopped (in its end delay, or as it ended) is them picking
+        -- where it goes, whatever Respect Manual Zoom says: going back after it looked like a phantom zoom undoing it
         local settings = db[previous]
-        if settings.restore and channel.saved and not (db.respectManualZoom and channel.manual) then
-            channel.zoom(channel.saved, settings.endTransition, true)
+        local ended = lastEnded[previous]
+        local zoomedAfter = channel == channels.camera and ended and playerZoomedAt >= ended
+        if zoomedAfter then
+            debugLog("going back skipped: you zoomed after it ended")
+        elseif settings.restore and channel.saved and not (db.respectManualZoom and channel.manual) then
+            channel.zoom(channel.saved, settings.endTransition)
         end
         channel.saved, channel.saveWhenStill = nil, nil
     end
@@ -620,6 +621,7 @@ local function poll()
         else
             endedAt[id] = endedAt[id] or time
             if time - endedAt[id] >= db[id].endDelay then
+                lastEnded[id] = endedAt[id]
                 startedAt[id], endedAt[id] = nil, nil
             else
                 now[id] = true -- still in its end delay
@@ -655,7 +657,7 @@ local function playerZoom(direction, amount, ...)
     if zoomingCamera then return gameZoom(direction, amount, ...) end
     manualZooms = manualZooms + 1
     if channels.camera.owner then channels.camera.manual = true end
-    lastManualAt = GetTime()
+    lastManualAt, playerZoomedAt = GetTime(), GetTime()
     if heldZooms then
         heldZooms[#heldZooms + 1] = { direction, amount }
         return
