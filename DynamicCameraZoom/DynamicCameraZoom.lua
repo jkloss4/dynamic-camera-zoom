@@ -605,17 +605,45 @@ local function poll()
 end
 
 -- The player zooming the camera (mouse wheel, keys) or minimap (its zoom buttons) themselves
-local function playerZoomed()
+local TAKEOVER_NUDGE = 0.1 -- yards: a zoom the other way that only drops the rest of the one moving (see playerZoomed)
+
+local function playerZoomed(amount, direction)
     if zoomingCamera then return end
     manualZooms = manualZooms + 1
-    -- Where our zoom was headed no longer says where the camera's going (the player's zoom adds to it, or drops it if
-    -- it goes the other way): the next zoom waits for the camera to stop and goes from there (see zoomCamera)
-    lastManualAt = GetTime()
-    cameraTarget = nil
     if channels.camera.owner then channels.camera.manual = true end
+    lastManualAt = GetTime()
+
+    -- The player zoomed while our speed is set: their zoom went at our (slow) speed, and putting their speed back
+    -- later stretched it (tested: 69 wheel clicks crawled out at 1 yd/s, then shot to the max when the speed went
+    -- back). So ours stops where the camera is, their speed goes back, and their zoom goes from there. A zoom the other
+    -- way drops the rest of the one moving and goes from where the camera is (tested), so a small one the other way and
+    -- then one back to their target does it.
+    if db and db.userZoomSpeed and type(amount) == "number" and amount > 0 then
+        local at = GetCameraZoom()
+        local target = math.max(0, math.min(at + direction * amount, maxCameraDistance()))
+        stopEase()
+        speedToken = speedToken + 1 -- no check: the player has it
+        restoreZoomSpeed()
+        zoomSpeed = nil
+        local change = target - at
+        zoomingCamera = true
+        if change > 0 then
+            CameraZoomIn(TAKEOVER_NUDGE)
+            CameraZoomOut(change)
+        elseif change < 0 then
+            CameraZoomOut(TAKEOVER_NUDGE)
+            CameraZoomIn(-change)
+        end
+        zoomingCamera = false
+        debugLog(("you zoomed %s %.1f during ours: ours stopped, your speed back, from %.2f to %.2f"):format(
+            direction > 0 and "out" or "in", amount, at, target))
+    end
+    -- Where our zoom was headed no longer says where the camera's going: the next zoom waits for the camera to stop and
+    -- goes from there (see zoomCamera)
+    cameraTarget = nil
 end
-hooksecurefunc("CameraZoomIn", playerZoomed)
-hooksecurefunc("CameraZoomOut", playerZoomed)
+hooksecurefunc("CameraZoomIn", function(amount) playerZoomed(amount, -1) end)
+hooksecurefunc("CameraZoomOut", function(amount) playerZoomed(amount, 1) end)
 if Minimap then
     hooksecurefunc(Minimap, "SetZoom", function()
         if not zoomingMinimap and channels.minimap.owner then channels.minimap.manual = true end
