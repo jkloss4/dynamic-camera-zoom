@@ -273,6 +273,12 @@ zoomCamera = function(distance, transition, isCorrection)
         easeFrame:Hide()
     end
     local change = distance - cameraDistance()
+    -- A zoom the other way drops the rest of the one in progress (tested: zooming out 8 while a zoom in still had
+    -- 4.7 to go went 8 out from where the camera was, not 3.3), so it goes by where the camera is, at its own speed.
+    if inProgress and (cameraTarget - GetCameraZoom()) * (distance - GetCameraZoom()) < 0 then
+        inProgress = false
+        change = distance - GetCameraZoom()
+    end
     if math.abs(change) < 0.05 then return end
 
     -- The speed is for the glide from where the camera really is; kept as it is while a zoom of ours is moving
