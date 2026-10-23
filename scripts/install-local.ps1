@@ -1,12 +1,16 @@
 <#
 .SYNOPSIS
   Copies the addon folder from this repo into the WoW AddOns folder (for testing local changes).
+.PARAMETER Client
+  retail or forever: the client to install into, found by find-wow-addons.ps1. Defaults to forever.
 .PARAMETER AddOnsPath
-  Path to Interface\AddOns. Defaults to the WoW: Forever install used on this machine.
+  An Interface\AddOns folder to install into instead.
 #>
 param(
-  [string]$AddOnsPath = "C:\Games\Battle.net\Games\World of Warcraft\_classic_beta_\Interface\AddOns"
+  [ValidateSet("retail", "forever")][string]$Client = "forever",
+  [string]$AddOnsPath
 )
+if (-not $AddOnsPath) { $AddOnsPath = & (Join-Path $PSScriptRoot "find-wow-addons.ps1") -Client $Client }
 $repo = Split-Path -Parent $PSScriptRoot
 foreach ($name in "DynamicCameraZoom") {
   # /MIR makes the installed folder an exact mirror (removes files deleted from the repo); only touches this folder.
